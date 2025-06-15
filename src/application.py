@@ -13,7 +13,13 @@ from src.constants.constants import (
     EventType,
     ListeningMode,
 )
-from src.display import cli_display, gui_display
+from src.display import cli_display
+
+try:
+    from src.display import gui_display
+except ImportError:  # PyQt5 or other GUI deps missing
+    gui_display = None
+from src.display.web_display import WebDisplay
 from src.protocols.mqtt_protocol import MqttProtocol
 from src.protocols.websocket_protocol import WebsocketProtocol
 from src.utils.common_utils import handle_verification_code
@@ -220,20 +226,34 @@ class Application:
         logger.debug("设置显示界面类型: %s", mode)
         # 通过适配器的概念管理不同的显示模式
         if mode == "gui":
-            self.display = gui_display.GuiDisplay()
-            logger.debug("已创建GUI显示界面")
+            if gui_display is None:
+                logger.error("GUI 模式需要安装 PyQt5，已回退到 CLI 模式")
+                mode = "cli"
+            else:
+                self.display = gui_display.GuiDisplay()
+                logger.debug("已创建GUI显示界面")
+                self.display.set_callbacks(
+                    press_callback=self.start_listening,
+                    release_callback=self.stop_listening,
+                    status_callback=self._get_status_text,
+                    text_callback=self._get_current_text,
+                    emotion_callback=self._get_current_emotion,
+                    mode_callback=self._on_mode_changed,
+                    auto_callback=self.toggle_chat_state,
+                    abort_callback=lambda: self.abort_speaking(
+                        AbortReason.WAKE_WORD_DETECTED
+                    ),
+                    send_text_callback=self._send_text_tts,
+                )
+                logger.debug("显示界面回调函数设置完成")
+                return
+        elif mode == "web":
+            self.display = WebDisplay()
+            logger.debug("已创建Web显示界面")
             self.display.set_callbacks(
-                press_callback=self.start_listening,
-                release_callback=self.stop_listening,
                 status_callback=self._get_status_text,
                 text_callback=self._get_current_text,
                 emotion_callback=self._get_current_emotion,
-                mode_callback=self._on_mode_changed,
-                auto_callback=self.toggle_chat_state,
-                abort_callback=lambda: self.abort_speaking(
-                    AbortReason.WAKE_WORD_DETECTED
-                ),
-                send_text_callback=self._send_text_tts,
             )
         else:
             self.display = cli_display.CliDisplay()
@@ -293,7 +313,7 @@ class Application:
 
     def _handle_input_audio(self):
         """处理音频输入."""
-        if self.device_state != DeviceState.LISTENING:
+        if self.device_state != DeviceState.LISTENING or not self.audio_codec:
             return
 
         # 读取并发送音频数据
@@ -312,7 +332,7 @@ class Application:
 
     def _handle_output_audio(self):
         """处理音频输出."""
-        if self.device_state != DeviceState.SPEAKING:
+        if self.device_state != DeviceState.SPEAKING or not self.audio_codec:
             return
         self.set_is_tts_playing(True)  # 开始播放
         self.audio_codec.play_audio()
@@ -340,7 +360,7 @@ class Application:
 
     def _on_incoming_audio(self, data):
         """接收音频数据回调."""
-        if self.device_state == DeviceState.SPEAKING:
+        if self.device_state == DeviceState.SPEAKING and self.audio_codec:
             self.audio_codec.write_audio(data)
             self.events[EventType.AUDIO_OUTPUT_READY_EVENT].set()
 
@@ -395,7 +415,8 @@ class Application:
         self.aborted = False
         self.set_is_tts_playing(True)  # 开始播放
         # 清空可能存在的旧音频数据
-        self.audio_codec.clear_audio_queue()
+        if self.audio_codec:
+            self.audio_codec.clear_audio_queue()
 
         if (
             self.device_state == DeviceState.IDLE
@@ -409,7 +430,7 @@ class Application:
 
     def _handle_tts_stop(self):
         """处理TTS停止事件."""
-        if self.device_state == DeviceState.SPEAKING:
+        if self.device_state == DeviceState.SPEAKING and self.audio_codec:
             # 给音频播放一个缓冲时间，确保所有音频都播放完毕
             def delayed_state_change():
                 # 等待音频队列清空
@@ -501,6 +522,9 @@ class Application:
 
     def _start_audio_streams(self):
         """启动音频流."""
+        if not self.audio_codec:
+            logger.warning("音频编解码器不可用，无法启动音频流")
+            return
         try:
             # 不再关闭和重新打开流，只确保它们处于活跃状态
             if (
@@ -558,6 +582,7 @@ class Application:
                 # 只有在主动监听状态下才触发输入事件
                 if (
                     self.device_state == DeviceState.LISTENING
+                    and self.audio_codec
                     and self.audio_codec.input_stream
                 ):
                     self.events[EventType.AUDIO_INPUT_READY_EVENT].set()
@@ -1217,7 +1242,12 @@ class Application:
     def _initialize_iot_devices(self):
         """初始化物联网设备."""
         from src.iot.thing_manager import ThingManager
-        from src.iot.things.CameraVL.Camera import Camera
+        try:
+            from src.iot.things.CameraVL.Camera import Camera  # type: ignore
+            has_camera = True
+        except Exception as e:
+            has_camera = False
+            logger.warning("摄像头模块加载失败: %s", e)
 
         # 导入新的倒计时器设备
         from src.iot.things.countdown_timer import CountdownTimer
@@ -1233,7 +1263,8 @@ class Application:
         thing_manager.add_thing(Speaker())
         thing_manager.add_thing(MusicPlayer())
         # 默认不启用以下示例
-        thing_manager.add_thing(Camera())
+        if has_camera:
+            thing_manager.add_thing(Camera())
 
         # 添加倒计时器设备
         thing_manager.add_thing(CountdownTimer())

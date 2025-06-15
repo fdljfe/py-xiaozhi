@@ -1,5 +1,6 @@
 import argparse
 import io
+import os
 import signal
 import sys
 
@@ -8,6 +9,9 @@ from src.utils.logging_config import get_logger, setup_logging
 
 logger = get_logger(__name__)
 # 配置日志
+
+# Use dummy audio driver if no audio device is available
+os.environ.setdefault("SDL_AUDIODRIVER", "dummy")
 
 
 def parse_args():
@@ -23,9 +27,9 @@ def parse_args():
     # 添加界面模式参数
     parser.add_argument(
         "--mode",
-        choices=["gui", "cli"],
+        choices=["gui", "cli", "web"],
         default="gui",
-        help="运行模式：gui(图形界面) 或 cli(命令行)",
+        help="运行模式：gui(图形界面)、cli(命令行) 或 web(网页)",
     )
 
     # 添加协议选择参数

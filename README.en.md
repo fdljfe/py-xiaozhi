@@ -43,6 +43,9 @@ py-xiaozhi is a Python-based Xiaozhi voice client, designed to learn coding and 
 - **Auto Dialogue Mode**: Implements continuous dialogue experience, enhancing user interaction fluidity.
 - **Graphical Interface**: Provides intuitive GUI with Xiaozhi expressions and text display, enhancing visual experience.
 - **Command Line Mode**: Supports CLI operation, suitable for embedded devices or environments without GUI.
+- **Web Mode**: Provides an interactive FastAPI web page to view status and send text from your browser.
+- **SoundDevice Audio**: Uses the `sounddevice` library for audio I/O, removing the PyAudio dependency.
+- **Optional Camera Support**: Camera-based features require OpenCV. If `cv2` is not installed, these features are skipped automatically.
 - **Cross-platform Support**: Compatible with Windows 10+, macOS 10.15+, and Linux systems for use anywhere.
 - **Volume Control**: Supports volume adjustment to adapt to different environmental requirements with unified sound control interface.
 - **Session Management**: Effectively manages multi-turn dialogues to maintain interaction continuity.
@@ -56,6 +59,13 @@ py-xiaozhi is a Python-based Xiaozhi voice client, designed to learn coding and 
 - Python version: 3.9 >= version <= 3.12
 - Supported operating systems: Windows 10+, macOS 10.15+, Linux
 - Microphone and speaker devices
+
+### Web Mode Usage
+Launch the application in web mode to access the status page at `http://localhost:8000`:
+
+```bash
+python main.py --mode web
+```
 
 ## Read This First!
 - Carefully read [项目文档](https://huangjunsen0406.github.io/py-xiaozhi/) for startup tutorials and file descriptions

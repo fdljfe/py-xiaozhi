@@ -2,9 +2,15 @@ import queue
 import threading
 import time
 
-import numpy as np
 import opuslib
-import pyaudio
+
+try:
+    import sounddevice as sd
+
+    _sd_import_error = None
+except Exception as e:  # PortAudio or sounddevice import error
+    sd = None
+    _sd_import_error = e
 
 from src.constants.constants import AudioConfig
 from src.utils.logging_config import get_logger
@@ -16,20 +22,20 @@ class AudioCodec:
     """音频编解码器类，处理音频的录制和播放（严格兼容版）"""
 
     def __init__(self):
-        self.audio = None
+        self._is_closing = False
         self.input_stream = None
         self.output_stream = None
         self.opus_encoder = None
         self.opus_decoder = None
-        # 设置队列最大大小，防止内存溢出（约10秒音频缓冲）
         max_queue_size = int(10 * 1000 / AudioConfig.FRAME_DURATION)
         self.audio_decode_queue = queue.Queue(maxsize=max_queue_size)
 
-        # 状态管理（保留原始变量名）
-        self._is_closing = False
         self._is_input_paused = False
         self._input_paused_lock = threading.Lock()
         self._stream_lock = threading.Lock()
+
+        if sd is None:
+            raise RuntimeError(f"sounddevice unavailable: {_sd_import_error}")
 
         # 设备索引缓存已移除（未使用）
 
@@ -37,8 +43,6 @@ class AudioCodec:
 
     def _initialize_audio(self):
         try:
-            self.audio = pyaudio.PyAudio()
-
             # 初始化流（优化实现）
             self.input_stream = self._create_stream(is_input=True)
             self.output_stream = self._create_stream(is_input=False)
@@ -53,6 +57,10 @@ class AudioCodec:
                 AudioConfig.OUTPUT_SAMPLE_RATE, AudioConfig.CHANNELS
             )
 
+            # 启动流
+            self.input_stream.start()
+            self.output_stream.start()
+
             logger.info("音频设备和编解码器初始化成功")
         except Exception as e:
             logger.error(f"初始化音频设备失败: {e}")
@@ -60,25 +68,23 @@ class AudioCodec:
             raise
 
     def _create_stream(self, is_input=True):
-        """流创建逻辑."""
-        params = {
-            "format": pyaudio.paInt16,
-            "channels": AudioConfig.CHANNELS,
-            "rate": (
-                AudioConfig.INPUT_SAMPLE_RATE
-                if is_input
-                else AudioConfig.OUTPUT_SAMPLE_RATE
-            ),
-            "input" if is_input else "output": True,
-            "frames_per_buffer": (
-                AudioConfig.INPUT_FRAME_SIZE
-                if is_input
-                else AudioConfig.OUTPUT_FRAME_SIZE
-            ),
-            "start": False,
-        }
-
-        return self.audio.open(**params)
+        """创建并返回声音设备流."""
+        samplerate = (
+            AudioConfig.INPUT_SAMPLE_RATE
+            if is_input
+            else AudioConfig.OUTPUT_SAMPLE_RATE
+        )
+        blocksize = (
+            AudioConfig.INPUT_FRAME_SIZE if is_input else AudioConfig.OUTPUT_FRAME_SIZE
+        )
+        StreamClass = sd.RawInputStream if is_input else sd.RawOutputStream
+        return StreamClass(
+            samplerate=samplerate,
+            channels=AudioConfig.CHANNELS,
+            dtype="int16",
+            blocksize=blocksize,
+            start=False,
+        )
 
     def _reinitialize_stream(self, is_input=True):
         """通用流重建方法."""
@@ -91,14 +97,14 @@ class AudioCodec:
 
             if current_stream:
                 try:
-                    current_stream.stop_stream()
+                    current_stream.stop()
                     current_stream.close()
                 except Exception:
                     pass
 
             new_stream = self._create_stream(is_input=is_input)
             setattr(self, stream_attr, new_stream)
-            new_stream.start_stream()
+            new_stream.start()
 
             stream_type = "输入" if is_input else "输出"
             logger.info(f"音频{stream_type}流重新初始化成功")
@@ -133,26 +139,22 @@ class AudioCodec:
         try:
             with self._stream_lock:
                 # 流状态检查优化
-                if not self.input_stream or not self.input_stream.is_active():
+                if not self.input_stream or not self.input_stream.active:
                     if not self._reinitialize_stream(is_input=True):
                         return None
 
                 # 动态缓冲区调整 - 实时性能优化
-                available = self.input_stream.get_read_available()
+                available = self.input_stream.read_available
                 if available > AudioConfig.INPUT_FRAME_SIZE * 2:  # 降低阈值从3倍到2倍
                     skip_samples = available - (
                         AudioConfig.INPUT_FRAME_SIZE * 1.5
                     )  # 减少保留量
                     if skip_samples > 0:  # 增加安全检查
-                        self.input_stream.read(
-                            int(skip_samples), exception_on_overflow=False  # 确保整数
-                        )
+                        self.input_stream.read(int(skip_samples))
                         logger.debug(f"跳过{skip_samples}个样本减少延迟")
 
                 # 读取数据
-                data = self.input_stream.read(
-                    AudioConfig.INPUT_FRAME_SIZE, exception_on_overflow=False
-                )
+                data, _ = self.input_stream.read(AudioConfig.INPUT_FRAME_SIZE)
 
                 # 数据验证
                 if len(data) != AudioConfig.INPUT_FRAME_SIZE * 2:
@@ -197,10 +199,8 @@ class AudioCodec:
                     # 播放音频数据，失败直接丢弃
                     try:
                         with self._stream_lock:
-                            if self.output_stream and self.output_stream.is_active():
-                                self.output_stream.write(
-                                    np.frombuffer(pcm, dtype=np.int16).tobytes()
-                                )
+                            if self.output_stream and self.output_stream.active:
+                                self.output_stream.write(pcm)
                             else:
                                 logger.warning("输出流未激活，丢弃此帧")
                     except OSError as e:
@@ -234,10 +234,10 @@ class AudioCodec:
                 if self.input_stream:
                     try:
                         if (
-                            hasattr(self.input_stream, "is_active")
-                            and self.input_stream.is_active()
+                            hasattr(self.input_stream, "active")
+                            and self.input_stream.active
                         ):
-                            self.input_stream.stop_stream()
+                            self.input_stream.stop()
                         self.input_stream.close()
                     except Exception as e:
                         logger.warning(f"关闭输入流失败: {e}")
@@ -248,24 +248,15 @@ class AudioCodec:
                 if self.output_stream:
                     try:
                         if (
-                            hasattr(self.output_stream, "is_active")
-                            and self.output_stream.is_active()
+                            hasattr(self.output_stream, "active")
+                            and self.output_stream.active
                         ):
-                            self.output_stream.stop_stream()
+                            self.output_stream.stop()
                         self.output_stream.close()
                     except Exception as e:
                         logger.warning(f"关闭输出流失败: {e}")
                     finally:
                         self.output_stream = None
-
-                # 最后释放PyAudio
-                if self.audio:
-                    try:
-                        self.audio.terminate()
-                    except Exception as e:
-                        logger.warning(f"释放PyAudio失败: {e}")
-                    finally:
-                        self.audio = None
 
             # 清理编解码器
             self.opus_encoder = None
@@ -336,9 +327,9 @@ class AudioCodec:
             ]:
                 if stream:
                     try:
-                        # 使用hasattr避免在流已关闭情况下调用is_active
-                        if hasattr(stream, "is_active") and stream.is_active():
-                            stream.stop_stream()
+                        # 使用hasattr避免在流已关闭情况下调用active
+                        if hasattr(stream, "active") and stream.active:
+                            stream.stop()
                     except Exception as e:
                         # 使用warning级别，因为这不是严重错误
                         logger.warning(f"停止{name}流失败: {e}")

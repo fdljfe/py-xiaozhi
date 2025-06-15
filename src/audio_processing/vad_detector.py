@@ -3,7 +3,7 @@ import threading
 import time
 
 import numpy as np
-import pyaudio
+import sounddevice as sd
 import webrtcvad
 
 from src.constants.constants import AbortReason, DeviceState
@@ -48,8 +48,7 @@ class VADDetector:
         self.silence_count = 0
         self.triggered = False
 
-        # 创建独立的PyAudio实例和流，避免与主音频流冲突
-        self.pa = None
+        # 独立的录音流，避免与主音频流冲突
         self.stream = None
 
     def start(self):
@@ -102,33 +101,16 @@ class VADDetector:
     def _initialize_audio_stream(self):
         """初始化独立的音频流."""
         try:
-            # 创建PyAudio实例
-            self.pa = pyaudio.PyAudio()
-
-            # 获取默认输入设备
-            device_index = None
-            for i in range(self.pa.get_device_count()):
-                device_info = self.pa.get_device_info_by_index(i)
-                if device_info["maxInputChannels"] > 0:
-                    device_index = i
-                    break
-
-            if device_index is None:
-                logger.error("找不到可用的输入设备")
-                return False
-
             # 创建输入流
-            self.stream = self.pa.open(
-                format=pyaudio.paInt16,
+            self.stream = sd.RawInputStream(
+                samplerate=self.sample_rate,
                 channels=1,
-                rate=self.sample_rate,
-                input=True,
-                input_device_index=device_index,
-                frames_per_buffer=self.frame_size,
+                dtype="int16",
+                blocksize=self.frame_size,
                 start=True,
             )
 
-            logger.info(f"VAD检测器音频流已初始化，使用设备索引: {device_index}")
+            logger.info("VAD检测器音频流已初始化")
             return True
 
         except Exception as e:
@@ -139,13 +121,9 @@ class VADDetector:
         """关闭音频流."""
         try:
             if self.stream:
-                self.stream.stop_stream()
+                self.stream.stop()
                 self.stream.close()
                 self.stream = None
-
-            if self.pa:
-                self.pa.terminate()
-                self.pa = None
 
             logger.info("VAD检测器音频流已关闭")
         except Exception as e:
@@ -192,11 +170,11 @@ class VADDetector:
     def _read_audio_frame(self):
         """读取一帧音频数据."""
         try:
-            if not self.stream or not self.stream.is_active():
+            if not self.stream or not self.stream.active:
                 return None
 
             # 读取音频数据
-            data = self.stream.read(self.frame_size, exception_on_overflow=False)
+            data, _ = self.stream.read(self.frame_size)
             return data
         except Exception as e:
             logger.error(f"读取音频帧失败: {e}")
